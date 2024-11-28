@@ -1,0 +1,118 @@
+package lightweight
+
+import (
+	"blockEmulator/core"
+	"blockEmulator/params"
+	"crypto/sha256"
+	"encoding/csv"
+	"fmt"
+	"log"
+	"math/big"
+	"math/rand"
+	"os"
+	"strconv"
+	"time"
+)
+
+func last16bitsToInt(data []byte) int {
+	if len(data) < 2 {
+		panic("Byte slice length must be at least 2")
+	}
+
+	// 截取最后 2 个字节
+	last16bits := data[len(data)-2:]
+
+	// 将字节序列转换为 int
+	var result int
+	for _, b := range last16bits {
+		result = result<<8 + int(b)
+	}
+
+	return result
+}
+
+func selectNodes(seed int, totalNodes, selectNumber, thisNode int) bool {
+	step := 13
+	if totalNodes == step {
+		step = 17
+	}
+	p := seed % totalNodes
+	for n := 0; n < selectNumber; n++ {
+		p = (p + step) % totalNodes
+		if p == thisNode {
+			return true
+		}
+	}
+	return false
+}
+
+func isSigner(bHash []byte, nodeid int) bool {
+	// return lwn.NodeID >= uint(params.ProposerNum) && lwn.NodeID < uint(params.ProposerNum+params.TotalSignerNum)
+	seed := last16bitsToInt(bHash)
+	return selectNodes(seed, params.NodesInShard, params.TotalSignerNum, nodeid)
+}
+
+func isProposer(bHash []byte, nodeid int) bool {
+	// return lwn.NodeID < uint(params.ProposerNum)
+	// for a signed block, hash twice
+	bhash := sha256.Sum256(bHash)
+	seed := last16bitsToInt(bhash[:])
+	return selectNodes(seed, params.NodesInShard, params.ProposerNum, nodeid)
+}
+
+func LWNGenerateTxs(txSize int, uniqueSource int) []*core.Transaction {
+	txs := make([]*core.Transaction, 0)
+
+	r := rand.New(rand.NewSource(time.Now().UnixNano() + int64(uniqueSource)))
+	for i := 0; i < txSize; i++ {
+		payerInt := r.Int63n(200000) + 123456
+		payeeInt := r.Int63n(200000) + 123456
+		valueInt := r.Int63n(123456)
+		payerString := strconv.Itoa(int(payerInt))
+		payeeString := strconv.Itoa(int(payeeInt))
+		valueBigInt := new(big.Int).SetInt64(valueInt)
+
+		tx := core.NewTransaction(payerString, payeeString, valueBigInt, uint64(uniqueSource+i))
+		txs = append(txs, tx)
+	}
+
+	return txs
+}
+
+func write_csv(sid, nid int, blockHeights []int, blockScore []*big.Int, datasize []int, blockGenerateTS []time.Time, blockArriveTS []time.Time, blockBeforeMPTTS []time.Time, blockOnChainTS []time.Time) {
+	dirpath := fmt.Sprintf("%s/lw_nodeNum=%d_proposerNum=%d_signerNum=%d_requiredSign=%d_blockSize=%d_PreloaddataSize=%d_bandwidth=%d/", params.DataWrite_path,
+		params.NodesInShard, params.ProposerNum, params.TotalSignerNum, params.RequiredSignNum, params.MaxBlockSize_global, params.TotalDataSize, params.Bandwidth)
+	err := os.MkdirAll(dirpath, os.ModePerm)
+	if err != nil {
+		log.Panic(err)
+	}
+
+	targetPath := dirpath + "/Shard" + strconv.Itoa(sid) + "_Node" + strconv.Itoa(nid) + ".csv"
+	f, err := os.Open(targetPath)
+	if err != nil {
+		file, er := os.Create(targetPath)
+		if er != nil {
+			panic(er)
+		}
+		defer file.Close()
+
+		w := csv.NewWriter(file)
+		title := []string{"blockHeight", "Score", "dataSize", "blockGenerate", "blockArrived", "blockBeforeMPT", "blockUpToChain"}
+		w.Write(title)
+		w.Flush()
+
+		for i, val := range blockHeights {
+			w.Write([]string{
+				strconv.Itoa(val),
+				blockScore[i].String(),
+				strconv.FormatInt(int64(datasize[i]), 10),
+				strconv.FormatInt(blockGenerateTS[i].UnixMilli(), 10),
+				strconv.FormatInt(blockArriveTS[i].UnixMilli(), 10),
+				strconv.FormatInt(blockBeforeMPTTS[i].UnixMilli(), 10),
+				strconv.FormatInt(blockOnChainTS[i].UnixMilli(), 10),
+			})
+			w.Flush()
+		}
+		f.Close()
+	}
+}

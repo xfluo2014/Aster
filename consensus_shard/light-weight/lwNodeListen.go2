@@ -1,0 +1,141 @@
+package lightweight
+
+import (
+	"blockEmulator/core"
+	"blockEmulator/message"
+	"bufio"
+	"encoding/json"
+	"io"
+	"log"
+	"net"
+	"strings"
+	"time"
+)
+
+// light weight node begin listen message
+func (lw *LightWeightNode) TcpListen() {
+	lw.IPaddr = "0.0.0.0:" + strings.Split(lw.IPaddr, ":")[1]
+	ln, err := net.Listen("tcp", lw.IPaddr)
+	lw.tcpln = ln
+	if err != nil {
+		lw.lwLog.Llog.Panic("err:", err)
+	}
+	for {
+		conn, err := lw.tcpln.Accept()
+		if err != nil {
+			return
+		}
+		go lw.preHandleMessageRequest(conn)
+	}
+}
+
+// handle
+func (lw *LightWeightNode) preHandleMessageRequest(con net.Conn) {
+	defer con.Close()
+	clientReader := bufio.NewReader(con)
+	for {
+		clientRequest, err := clientReader.ReadBytes('\n')
+		if lw.stop.Load() {
+			return
+		}
+		switch err {
+		case nil:
+			lw.tcpPoolLock.Lock()
+			lw.handleMessage(clientRequest)
+			lw.tcpPoolLock.Unlock()
+		case io.EOF:
+			log.Println("client closed the connection by terminating the process")
+			return
+		default:
+			log.Printf("error: %v\n", err)
+			return
+		}
+	}
+}
+
+func (lw *LightWeightNode) handleMessage(msg []byte) {
+	msgType, content := message.SplitMessage(msg)
+	switch msgType {
+	case message.LW_BlockBroadcast:
+		lw.handleLWBlockMsg(content)
+	case message.LW_SignBroadcast:
+		lw.handleLWSignMsg(content)
+	}
+}
+
+func (lw *LightWeightNode) handleLWBlockMsg(content []byte) {
+	lwb := new(message.LW_BlockMsg)
+	err := json.Unmarshal(content, lwb)
+	if err != nil {
+		lw.lwLog.Llog.Panic("err:", err)
+	}
+	lwbBlock := core.DecodeB(lwb.EncodedBlock)
+
+	// log here
+	lw.lwLog.Llog.Printf("Block Msg is received from %d\n", lwb.FromNodeID)
+
+	// judge the validity of a block
+	if !isProposer(lwbBlock.Header.ParentBlockHash, int(lwb.FromNodeID)) {
+		lw.lwLog.Llog.Panic("err: ", "wrong block generator")
+	}
+
+	// if this block is not added before, record its time
+	if _, ok := lw.blockArriveMap[string(lwbBlock.Hash)]; !ok {
+		lw.blockArriveMap[string(lwbBlock.Hash)] = time.Now()
+	}
+
+	// add a block into the pool
+	lw.block2SignLock.Lock()
+	if _, ok := lw.block2Sign[string(lwbBlock.Hash)]; !ok {
+		lw.block2Sign[string(lwbBlock.Hash)] = make(map[uint]bool)
+	}
+	lw.block2SignLock.Unlock()
+
+	lw.blockPoolLock.Lock()
+	lw.blockPool[string(lwbBlock.Hash)] = lwbBlock
+	lw.height2Digest[lwbBlock.Header.Number] = append(lw.height2Digest[lwbBlock.Header.Number], string(lwbBlock.Hash))
+	lw.blockPoolLock.Unlock()
+
+	// if it is a signer, sign for it.
+	if isSigner(lwbBlock.Hash[:], int(lw.NodeID)) {
+		lw.lwLog.Llog.Println("is a signer now.")
+		lw.signBlock(lwbBlock)
+	}
+
+	lw.tryAddBlockWithSig(lwbBlock)
+
+	lw.deleteHistoryBlockPool()
+
+}
+
+func (lw *LightWeightNode) handleLWSignMsg(content []byte) {
+	lws := new(message.LW_SignMsg)
+	err := json.Unmarshal(content, lws)
+	if err != nil {
+		lw.lwLog.Llog.Panic("err:", err)
+	}
+	// log here
+	lw.lwLog.Llog.Printf("Sign Msg is received\n")
+
+	// judge the signer is right or not
+	if !isSigner(lws.BlockHash, int(lws.FromNodeID)) {
+		lw.lwLog.Llog.Panic("err: ", "wrong sign generator")
+	}
+
+	lw.block2SignLock.Lock()
+	if _, ok := lw.block2Sign[string(lws.BlockHash)]; !ok {
+		lw.block2Sign[string(lws.BlockHash)] = make(map[uint]bool)
+	}
+	lw.block2Sign[string(lws.BlockHash)][lws.FromNodeID] = true
+	lw.lwLog.Llog.Printf("checking the signature is enough or not...")
+	lw.block2SignLock.Unlock()
+
+	lw.blockPoolLock.Lock()
+	tryBlock, ok := lw.blockPool[string(lws.BlockHash)]
+	lw.blockPoolLock.Unlock()
+
+	if ok {
+		lw.tryAddBlockWithSig(tryBlock)
+		lw.deleteHistoryBlockPool()
+	}
+}

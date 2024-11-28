@@ -1,0 +1,448 @@
+package lightweight
+
+import (
+	"blockEmulator/chain"
+	"blockEmulator/consensus_shard/light-weight/lw_log"
+	"blockEmulator/core"
+	"blockEmulator/message"
+	"blockEmulator/networks"
+	"blockEmulator/params"
+	"bytes"
+	"encoding/json"
+	"math/big"
+	"net"
+	"strconv"
+	"sync"
+	"sync/atomic"
+	"time"
+
+	"github.com/ethereum/go-ethereum/core/rawdb"
+	"github.com/ethereum/go-ethereum/ethdb"
+)
+
+type LightWeightNode struct {
+	// Node config
+	NodeID  uint
+	ShardID uint
+	IPaddr  string
+
+	// network config
+	ip_nodeTable map[uint64]map[uint64]string
+
+	// chain config
+	CurChain         *chain.BlockChain // all node in the shard maintain the same blockchain
+	db               ethdb.Database    // to save the mpt
+	chainHeight2Hash map[uint64]string
+
+	// chain lock
+	chainLock sync.Mutex
+
+	// logger
+	lwLog *lw_log.LWLog
+
+	// tcp control
+	tcpln       net.Listener
+	tcpPoolLock sync.Mutex
+
+	// stop control
+	stop atomic.Bool
+
+	// about block Pool record
+	chainHeightWithBlockAdds []int       // record the height of blockchain when a block is up-to-chain
+	blockGenerateTimestamp   []time.Time // record the time the block generated.
+	blockArriveTimestamp     []time.Time // record the time the block arrived.
+	blockBeforeMPTTimestamp  []time.Time // record the time the sign is all collected.
+	blockOnChainTimestamp    []time.Time // record the block time when a block is up-to-chain
+	blockScore               []*big.Int  // blockHash
+	dataSizeInEpoch          []int
+
+	blockArriveMap    map[string]time.Time // blockHash -> arrive time
+	blockBeforeMPTmap map[string]time.Time // blockHash -> time before mpt
+
+	block2Sign    map[string]map[uint]bool // record the map: blockHash -> the ids of nodes who signed this block
+	blockPool     map[string]*core.Block   // record the map: blockHash -> block
+	height2Digest map[uint64][]string      // record the map: blockHeight -> blockHash of the blocks at that height
+
+	// block pool lock
+	block2SignLock sync.Mutex // for block2Sign map
+	blockPoolLock  sync.Mutex // for blockPool & height2Digest maps
+
+	// block generate control
+	blockGenerateSignal chan bool
+	blockHashGenDone    map[string]bool
+
+	txsInBlock []*core.Transaction
+}
+
+func NewLightWeightNode(sID, nID uint, pcc *params.ChainConfig, messageHandleType string) *LightWeightNode {
+	lwn := new(LightWeightNode)
+
+	// node config setting
+	lwn.NodeID = nID
+	lwn.ShardID = sID
+	lwn.IPaddr = params.IPmap_nodeTable[uint64(sID)][uint64(nID)]
+
+	// network config setting
+	lwn.ip_nodeTable = params.IPmap_nodeTable
+
+	// logger config
+	lwn.lwLog = lw_log.NewLwLog(int(sID), int(nID))
+
+	// stop init
+	lwn.stop.Store(false)
+
+	// chain config setting
+	fp := "./record/ldb/s" + strconv.FormatUint(uint64(sID), 10) + "/n" + strconv.FormatUint(uint64(nID), 10)
+	var err error
+	lwn.db, err = rawdb.NewLevelDBDatabase(fp, 0, 1, "accountState", false)
+	if err != nil {
+		lwn.lwLog.Llog.Panic("err:", err)
+	}
+	lwn.CurChain, err = chain.NewBlockChain(pcc, lwn.db)
+	if err != nil {
+		lwn.lwLog.Llog.Panic("err:", "cannot new a blockchain")
+	}
+
+	lwn.chainHeight2Hash = make(map[uint64]string)
+	lwn.chainHeight2Hash[lwn.CurChain.CurrentBlock.Header.Number] = string(lwn.CurChain.CurrentBlock.Hash)
+
+	// block pool init
+	lwn.chainHeightWithBlockAdds = make([]int, 1)
+	lwn.blockOnChainTimestamp = make([]time.Time, 1)
+	lwn.blockGenerateTimestamp = make([]time.Time, 1)
+	lwn.blockScore = make([]*big.Int, 1)
+	lwn.dataSizeInEpoch = make([]int, 1)
+	lwn.blockArriveTimestamp = make([]time.Time, 1)
+	lwn.blockBeforeMPTTimestamp = make([]time.Time, 1)
+
+	// append block
+	lwn.chainHeightWithBlockAdds[0] = 0
+	lwn.blockOnChainTimestamp[0] = time.Now()
+	lwn.blockGenerateTimestamp[0] = lwn.CurChain.CurrentBlock.Header.Time
+	lwn.blockScore[0] = new(big.Int).SetBytes(lwn.CurChain.CurrentBlock.Hash)
+	lwn.dataSizeInEpoch[0] = len(lwn.CurChain.CurrentBlock.Encode())
+	lwn.blockArriveTimestamp[0] = time.Now()
+	lwn.blockBeforeMPTTimestamp[0] = time.Now()
+
+	lwn.block2Sign = make(map[string]map[uint]bool)
+	lwn.blockPool = make(map[string]*core.Block)
+	lwn.height2Digest = make(map[uint64][]string)
+	lwn.blockArriveMap = make(map[string]time.Time)
+	lwn.blockBeforeMPTmap = make(map[string]time.Time)
+
+	lwn.blockPool[string(lwn.CurChain.CurrentBlock.Hash)] = lwn.CurChain.CurrentBlock
+
+	// block pool lock
+
+	// block generate control
+	lwn.blockGenerateSignal = make(chan bool)
+	lwn.blockHashGenDone = make(map[string]bool)
+
+	return lwn
+}
+
+func (lwn *LightWeightNode) RunLWNode() {
+	stopChan := make(chan bool)
+	beginTime := time.Now()
+	// tx in block generate
+	randomSource := int(lwn.CurChain.CurrentBlock.Header.Number*10) + int(lwn.ShardID*1888+lwn.NodeID)
+	txs := LWNGenerateTxs(params.TotalDataSize, randomSource)
+	lwn.lwLog.Llog.Println("Tx Generate Over")
+	for len(txs) != 0 {
+		selectTxs := params.InjectSpeed
+		if selectTxs > len(txs) {
+			selectTxs = len(txs)
+		}
+		lwn.CurChain.Txpool.AddTxs2Pool(txs[:selectTxs])
+		txs = txs[selectTxs:]
+		time.Sleep(time.Second)
+	}
+
+	for time.Since(beginTime) < time.Second*time.Duration(params.TotalDataSize/80000) {
+		time.Sleep(time.Second)
+	}
+
+	go func() {
+		lwn.blockGenerateSignal <- true
+	}()
+
+	go func() {
+		networks.DynamicBandwidth()
+		time.Sleep(time.Duration(params.RunTime) * time.Second)
+		lwn.lwLog.Llog.Println("send to stop chan")
+		stopChan <- true
+	}()
+
+	for {
+		select {
+		case <-lwn.blockGenerateSignal:
+			block := lwn.blockGenerate()
+			lwn.blockBroadcast(block)
+		case <-stopChan:
+			lwn.lwLog.Llog.Println("Get stop chan")
+			lwn.closeLWNode()
+			close(lwn.blockGenerateSignal)
+			return
+		}
+	}
+}
+
+// get neighbor nodes in a shard
+func (lwn *LightWeightNode) getNeighborNodes() []string {
+	receiverNodes := make([]string, 0)
+	for _, ip := range lwn.ip_nodeTable[uint64(lwn.ShardID)] {
+		receiverNodes = append(receiverNodes, ip)
+	}
+	return receiverNodes
+}
+
+// delete old heights
+func (lwn *LightWeightNode) deleteHistoryBlockPool() {
+	nowHeight := lwn.CurChain.CurrentBlock.Header.Number
+	lwn.blockPoolLock.Lock()
+	defer lwn.blockPoolLock.Unlock()
+	var heightsToDelete []uint64
+	var blockHashToDelete []string
+	// 遍历map，同时删除满足条件的键值对
+	for key, value := range lwn.height2Digest {
+		if key+20 < nowHeight {
+			heightsToDelete = append(heightsToDelete, key)
+			blockHashToDelete = append(blockHashToDelete, value...)
+		}
+	}
+	for _, height := range heightsToDelete {
+		delete(lwn.height2Digest, height)
+	}
+
+	for _, bhash := range blockHashToDelete {
+		delete(lwn.blockPool, bhash)
+	}
+}
+
+// try to add the block which has enough signatures
+func (lwn *LightWeightNode) tryAddBlockWithSig(b *core.Block) bool {
+	if b == nil {
+		return false
+	}
+	// check the number of signs
+	lwn.block2SignLock.Lock()
+	sizeSig := len(lwn.block2Sign[string(b.Hash)])
+	lwn.block2SignLock.Unlock()
+	if sizeSig < params.RequiredSignNum {
+		lwn.lwLog.Llog.Printf("no enough signs")
+		return false
+	}
+
+	lwn.lwLog.Llog.Printf("now trying to add blocks with enough signatures")
+	// add the block in the current chain
+	lwn.chainLock.Lock()
+	defer lwn.chainLock.Unlock()
+	beforeMPTTime := time.Now()
+	ok := lwn.CurChain.AddBlock(b)
+	if ok {
+		lwn.chainHeight2Hash[b.Header.Number] = string(b.Hash)
+		lwn.lwLog.Llog.Println("now adding new block is ok")
+	} else {
+		lwn.lwLog.Llog.Printf("now trying to fork blockchain ...")
+		// if false, try fork
+		fork_ok := lwn.CurChain.JudgeForkValid_RollBack_withMap(b, lwn.chainHeight2Hash, lwn.blockPool)
+		if !fork_ok {
+			lwn.lwLog.Llog.Printf("This block cannot be fork, the block is from %d\n", b.Header.Miner)
+			return false
+		}
+	}
+	// log here
+	lwn.lwLog.Llog.Printf("block is added successfully, the block is from %d\n", b.Header.Miner)
+
+	lwn.blockBeforeMPTmap[string(b.Hash)] = beforeMPTTime
+	lwn.chainHeightWithBlockAdds = append(lwn.chainHeightWithBlockAdds, int(b.Header.Number))
+	lwn.blockOnChainTimestamp = append(lwn.blockOnChainTimestamp, time.Now())
+	lwn.blockGenerateTimestamp = append(lwn.blockGenerateTimestamp, b.Header.Time)
+	lwn.blockArriveTimestamp = append(lwn.blockArriveTimestamp, lwn.blockArriveMap[string(b.Hash)])
+	lwn.blockBeforeMPTTimestamp = append(lwn.blockBeforeMPTTimestamp, lwn.blockBeforeMPTmap[string(b.Hash)])
+	lwn.blockScore = append(lwn.blockScore, new(big.Int).SetBytes(b.Hash))
+	lwn.dataSizeInEpoch = append(lwn.dataSizeInEpoch, len(b.Encode()))
+	// log here
+	lwn.lwLog.Llog.Printf("now try to append new blocks\n")
+
+	if !bytes.Equal(lwn.CurChain.CurrentBlock.Hash, b.Hash) {
+		lwn.lwLog.Llog.Panic("err:", "wrong hash when adding")
+		return false
+	}
+
+	// if success, try to find the following blocks
+	tryNewBlockHeight := lwn.CurChain.CurrentBlock.Header.Number + 1
+	lwn.blockPoolLock.Lock()
+	for ; ; tryNewBlockHeight++ {
+		listLen := len(lwn.height2Digest[tryNewBlockHeight])
+		minBlockHashAtThisHeight := bytes.Repeat([]byte{255}, 32)
+		for i := 0; i < listLen; i++ {
+			bhash := lwn.height2Digest[tryNewBlockHeight][i]
+
+			// if signatures are not enough
+			lwn.block2SignLock.Lock()
+			flag := len(lwn.block2Sign[bhash]) < params.RequiredSignNum
+			lwn.block2SignLock.Unlock()
+			if flag {
+				continue
+			}
+
+			// fetch the block
+			newBlock, ok_fetchBlock := lwn.blockPool[bhash]
+			if !ok_fetchBlock {
+				continue
+			}
+			// the parenthash matches
+			if bytes.Equal(newBlock.Header.ParentBlockHash, lwn.CurChain.CurrentBlock.Hash) {
+				if bytes.Compare(newBlock.Hash, minBlockHashAtThisHeight) == -1 {
+					// replace the min blockHash, deep copy
+					minBlockHashAtThisHeight = newBlock.Hash[:]
+				}
+			}
+		}
+		// if no block satisfying these conditions, break
+		if bytes.Equal(minBlockHashAtThisHeight, bytes.Repeat([]byte{255}, 32)) {
+			lwn.lwLog.Llog.Printf("no satisfy blocks when forking\n")
+			break
+		}
+
+		beforeMPTTime2 := time.Now()
+		// add block
+		ok_add := lwn.CurChain.AddBlock(lwn.blockPool[string(minBlockHashAtThisHeight)])
+		if !ok_add {
+			lwn.lwLog.Llog.Printf("Add blocks err when forking\n")
+		}
+
+		lwn.blockBeforeMPTmap[string(minBlockHashAtThisHeight)] = beforeMPTTime2
+		lwn.chainHeight2Hash[tryNewBlockHeight] = string(minBlockHashAtThisHeight)
+		lwn.chainHeightWithBlockAdds = append(lwn.chainHeightWithBlockAdds, int(lwn.blockPool[string(minBlockHashAtThisHeight)].Header.Number))
+		lwn.blockOnChainTimestamp = append(lwn.blockOnChainTimestamp, time.Now())
+		lwn.blockGenerateTimestamp = append(lwn.blockGenerateTimestamp, lwn.blockPool[string(minBlockHashAtThisHeight)].Header.Time)
+		lwn.blockScore = append(lwn.blockScore, new(big.Int).SetBytes(lwn.blockPool[string(minBlockHashAtThisHeight)].Hash))
+		lwn.blockArriveTimestamp = append(lwn.blockArriveTimestamp, lwn.blockArriveMap[string(minBlockHashAtThisHeight)])
+		lwn.blockBeforeMPTTimestamp = append(lwn.blockBeforeMPTTimestamp, lwn.blockBeforeMPTmap[string(minBlockHashAtThisHeight)])
+
+		lwn.dataSizeInEpoch = append(lwn.dataSizeInEpoch, len(lwn.blockPool[string(minBlockHashAtThisHeight)].Encode()))
+	}
+	lwn.blockPoolLock.Unlock()
+
+	go func() {
+		defer func() {
+			recover()
+		}()
+		lwn.blockGenerateSignal <- true
+	}()
+
+	// log here
+	lwn.lwLog.Llog.Printf("blockchain forks done\n")
+	return true
+}
+
+func (lwn *LightWeightNode) blockGenerate() *core.Block {
+	lwn.chainLock.Lock()
+	defer lwn.chainLock.Unlock()
+
+	if !isProposer(lwn.CurChain.CurrentBlock.Hash, int(lwn.NodeID)) {
+		return nil
+	}
+
+	if _, ok := lwn.blockHashGenDone[string(lwn.CurChain.CurrentBlock.Hash)]; ok {
+		lwn.lwLog.Llog.Println("Block in this height is generated, skip & not re-generate")
+		return nil
+	}
+
+	lwn.lwLog.Llog.Println("be a proposer now...")
+	block := lwn.CurChain.GenerateBlock(int(lwn.NodeID))
+	lwn.blockHashGenDone[string(block.Header.ParentBlockHash)] = true
+	if !bytes.Equal(block.Header.ParentBlockHash, lwn.CurChain.CurrentBlock.Hash) {
+		lwn.lwLog.Llog.Panic("err:", "Err when generating block")
+	}
+
+	// log here
+	lwn.lwLog.Llog.Printf("block is generated, height = %d\n", block.Header.Number)
+	return block
+}
+
+func (lwn *LightWeightNode) blockBroadcast(block *core.Block) {
+	if block == nil {
+		return
+	}
+
+	lwbmsg := &message.LW_BlockMsg{
+		EncodedBlock: block.Encode(),
+		FromNodeID:   lwn.NodeID,
+	}
+	lwbByte, err := json.Marshal(lwbmsg)
+	if err != nil {
+		lwn.lwLog.Llog.Panic("err:", err)
+	}
+	send_msg := message.MergeMessage(message.LW_BlockBroadcast, lwbByte)
+
+	// broadcast this message
+	networks.Broadcast(lwn.IPaddr, lwn.getNeighborNodes(), send_msg)
+
+	// log here
+	lwn.lwLog.Llog.Printf("block is broadcast\n")
+}
+
+func (lwn *LightWeightNode) signBlock(block *core.Block) bool {
+	if !bytes.Equal(block.Hash, block.Header.Hash()) {
+		lwn.lwLog.Llog.Panic("err:", "err blockhash")
+	}
+
+	lwn.chainLock.Lock()
+	defer lwn.chainLock.Unlock()
+	lwn.blockPoolLock.Lock()
+	defer lwn.blockPoolLock.Unlock()
+	// get the current block at this height
+	bhashOnChain, con1 := lwn.chainHeight2Hash[block.Header.Number]
+	// if this blockhash on chain exists
+	if con1 {
+		blockOnChain, con2 := lwn.blockPool[bhashOnChain]
+		// if this block exists
+		if con2 {
+			// if they have the same parent hash & hash is smaller
+			con3 := bytes.Equal(blockOnChain.Header.ParentBlockHash, []byte(lwn.chainHeight2Hash[block.Header.Number-1]))
+			con4 := bytes.Equal(block.Header.ParentBlockHash, []byte(lwn.chainHeight2Hash[block.Header.Number-1]))
+			con5 := bytes.Compare(block.Hash, []byte(bhashOnChain)) == 1
+			if con3 && con4 && con5 {
+				lwn.lwLog.Llog.Printf("A higher score block is existed in chain. \n")
+				return false
+			}
+		}
+	}
+
+	lwn.signBroadcast([]byte{byte(lwn.NodeID), byte(lwn.ShardID)}, block.Hash)
+	return true
+}
+
+func (lwn *LightWeightNode) signBroadcast(sign, blockHash []byte) {
+	lwsmsg := &message.LW_SignMsg{
+		Signature:  sign,
+		FromNodeID: lwn.NodeID,
+		BlockHash:  blockHash[:],
+	}
+	lwsByte, err := json.Marshal(lwsmsg)
+	if err != nil {
+		lwn.lwLog.Llog.Panic("err:", err)
+	}
+	send_msg := message.MergeMessage(message.LW_SignBroadcast, lwsByte)
+
+	lwn.lwLog.Llog.Printf("now trying to broadcast sign\n")
+
+	// broadcast this message
+	networks.Broadcast(lwn.IPaddr, lwn.getNeighborNodes(), send_msg)
+
+	// log here
+	lwn.lwLog.Llog.Printf("sign is broadcast\n")
+}
+
+func (lwn *LightWeightNode) closeLWNode() {
+	lwn.lwLog.Llog.Println("Now close node ...")
+	write_csv(int(lwn.ShardID), int(lwn.NodeID), lwn.chainHeightWithBlockAdds, lwn.blockScore, lwn.dataSizeInEpoch, lwn.blockGenerateTimestamp, lwn.blockArriveTimestamp, lwn.blockBeforeMPTTimestamp, lwn.blockOnChainTimestamp)
+	lwn.stop.Store(true)
+	lwn.tcpln.Close()
+	lwn.chainLock.Lock()
+	lwn.CurChain.CloseBlockChain()
+	lwn.chainLock.Unlock()
+}
