@@ -1,13 +1,13 @@
 **the usage of each file:**
 
-linuxbat2.sh: the script to run a proposer and 2 follower on linux
-linuxbat3.sh: the script to run a proposer and 3 follower on linux
-linuxbat4.sh: the script to run a proposer and 3 follower on linux
-winbat2.bat: the script to run a proposer and 2 follower on windows
-winbat3.bat: the script to run a proposer and 3 follower on windows
-winbat4.bat: the script to run a proposer and 3 follower on windows
-and so forth...
+linuxbat2.sh: the script to run a proposer and 2 follower on linux<br>
+linuxbat3.sh: the script to run a proposer and 3 follower on linux<br>
+linuxbat4.sh: the script to run a proposer and 3 follower on linux<br>
+winbat2.bat: the script to run a proposer and 2 follower on windows<br>
+winbat3.bat: the script to run a proposer and 3 follower on windows<br>
+winbat4.bat: the script to run a proposer and 3 follower on windows<br>
+and so forth...<br>
 
-iptable.json: config the proposer's IPs and follower's IPs
-consensus_shard/subMPT: core code of proposer and follower in Aster
-main.go: the entrance of Aster system
+iptable.json: config the proposer's IPs and follower's IPs<br>
+consensus_shard/subMPT: core code of proposer and follower in Aster<br>
+main.go: the entrance of Aster system<br>
