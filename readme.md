@@ -11,3 +11,6 @@ and so forth...<br>
 iptable.json: config the proposer's IPs and follower's IPs<br>
 consensus_shard/subMPT: core code of proposer and follower in Aster<br>
 main.go: the entrance of Aster system<br>
+
+
+The experiment data is available at https://pan.baidu.com/s/1idKO568mnSV_a18zAEd9iQ?pwd=e6xn
