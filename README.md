@@ -28,7 +28,7 @@ Aster is a next-generation blockchain architecture designed to optimize scalabil
 
 ---
 
-### 3. **Efficient Cross-Node Transactions**  
+### 3. **Efficient Transactions**  
 - Transactions spanning multiple followers are handled via **Merkle proofs**.  
 - Proposers collect and verify these proofs, ensuring transaction correctness without excessive communication overhead.  
 
