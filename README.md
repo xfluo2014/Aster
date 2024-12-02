@@ -1,6 +1,6 @@
-# Aster: A Blockchain Architecture for Lightweight Nodes  
+# Aster: A Blockchain Architecture for Low-Resource Nodes  
 
-Aster is a next-generation blockchain architecture designed to optimize scalability and resource efficiency by integrating lightweight nodes. This system reduces the computational and storage burden on full nodes while maintaining decentralization and performance.
+Aster is a new blockchain architecture designed to optimize scalability and resource efficiency by integrating low-resource nodes. This system reduces the computational and storage burden on full nodes while maintaining decentralization and performance.
 
 ---
 
