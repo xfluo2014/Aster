@@ -55,4 +55,4 @@ Aster is a next-generation blockchain architecture designed to optimize scalabil
 
 ### **Clone the Repository**  
 ```bash  
-git clone https://github.com/example/aster-blockchain.git  
+git clone https://github.com/xfluo2014/Aster.git  
