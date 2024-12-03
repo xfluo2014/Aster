@@ -19,12 +19,10 @@ Aster is a new blockchain architecture designed to optimize scalability and reso
 ---
 
 ### 2. **Task Offloading and Incentives**  
-- **Proposer Node Recruitment**  
-  - Proposers recruit followers using decentralized node discovery protocols.  
-  - Relationships are formalized through smart contracts, which manage follower registration, task assignments, and reward distribution.  
 
-- **Incentive Distribution**  
-  - Smart contracts ensure automatic and transparent payment of rewards to followers, encouraging participation and reliability.  
+**Proposer Node Recruitment.** Proposers recruit followers using decentralized node discovery protocols. Relationships are formalized through smart contracts, which manage follower registration, task assignments, and reward distribution.  
+
+**Incentive Distribution.** Smart contracts ensure automatic and transparent payment of rewards to followers, encouraging participation and reliability.  
 
 ---
 
@@ -36,18 +34,13 @@ Aster is a new blockchain architecture designed to optimize scalability and reso
 
 ## **Advantages**  
 
-### **Resource Optimization**  
-- Proposer nodes offload computational and storage tasks to followers, reducing resource strain.  
-- Follower nodes store only relevant state segments, minimizing memory and storage usage.  
+**Resource Optimization.** Proposer nodes offload computational and storage tasks to followers, reducing resource strain. Follower nodes store only relevant state segments, minimizing memory and storage usage.  
 
-### **Scalability**  
-- Proposers can dynamically recruit followers as the network grows, enabling efficient scaling to support high transaction volumes.  
+**Scalability.** Proposers can dynamically recruit followers as the network grows, enabling efficient scaling to support high transaction volumes.  
 
-### **Fault Tolerance**  
-- Aster includes timeout mechanisms and task reassignment strategies to ensure stability in the event of node failure.  
+**Fault Tolerance.** Aster includes timeout mechanisms and task reassignment strategies to ensure stability in the event of node failure.  
 
-### **Simplified Incentives**  
-- Rewards are distributed in a mining pool-like manner, ensuring fairness and minimizing overhead.  
+**Simplified Incentives.** Rewards are distributed in a mining pool-like manner, ensuring fairness and minimizing overhead.  
 
 ---
 
