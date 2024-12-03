@@ -61,7 +61,7 @@ git clone https://github.com/xfluo2014/Aster.git
 
 
 
-**the usage of each file:**
+###**The Launch Files:**
 
 linuxbat2.sh: the script to run a proposer and 2 follower on linux<br>
 linuxbat3.sh: the script to run a proposer and 3 follower on linux<br>
